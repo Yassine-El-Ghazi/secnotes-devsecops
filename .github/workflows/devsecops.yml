@@ -32,6 +32,112 @@ jobs:
           path: coverage/
           retention-days: 7
 
+  dependency_scan:
+    name: SCA - npm audit
+    runs-on: self-hosted
+    needs: unit_tests
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: npm install
+      - name: Run npm audit
+        run: npm audit --json > npm-audit.json || true
+      - name: Show summary
+        run: |
+          cat npm-audit.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          vulns = data.get('metadata', {}).get('vulnerabilities', {})
+          print('Vulnerabilities found:')
+          for level, count in vulns.items():
+              print(f'  {level}: {count}')
+          "
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: npm-audit.json
+          retention-days: 7
+
+  secrets_scan:
+    name: Secrets Scan - Gitleaks
+    runs-on: self-hosted
+    needs: unit_tests
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        run: |
+          docker run --rm \
+            -v $(pwd):/path \
+            zricethezav/gitleaks:latest \
+            detect --source /path \
+            --report-format json \
+            --report-path /path/gitleaks-report.json \
+            --exit-code 0 || true
+      - name: Show Gitleaks summary
+        if: always()
+        run: |
+          if [ -f gitleaks-report.json ]; then
+            COUNT=$(cat gitleaks-report.json | python3 -c \
+              "import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)")
+            echo "Secrets found: $COUNT"
+          fi
+      - name: Upload Gitleaks report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          retention-days: 7
+
+  semgrep_scan:
+    name: SAST - Semgrep
+    runs-on: self-hosted
+    needs: unit_tests
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        run: |
+          pip install semgrep --break-system-packages --quiet
+          semgrep \
+            --config=p/nodejs \
+            --config=p/jwt \
+            --config=p/mongodb \
+            --config=p/owasp-top-ten \
+            --json \
+            --output=semgrep-report.json \
+            src/ || true
+      - name: Show Semgrep summary
+        if: always()
+        run: |
+          if [ -f semgrep-report.json ]; then
+            cat semgrep-report.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          results = data.get('results', [])
+          print(f'Total findings: {len(results)}')
+          for r in results[:10]:
+              sev = r.get('extra', {}).get('severity', 'UNKNOWN')
+              msg = r.get('extra', {}).get('message', '')[:80]
+              path = r.get('path', '')
+              line = r.get('start', {}).get('line', '')
+              print(f'  [{sev}] {path}:{line} - {msg}')
+          "
+          fi
+      - name: Upload Semgrep report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          retention-days: 7
+
   sonarqube_scan:
     name: SAST - SonarQube
     runs-on: self-hosted
@@ -58,6 +164,30 @@ jobs:
             -Dsonar.tests=tests
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
 
+  sonarqube_gate:
+    name: Quality Gate Check
+    runs-on: self-hosted
+    needs: sonarqube_scan
+    continue-on-error: true
+    steps:
+      - name: Check SonarQube Quality Gate
+        run: |
+          sleep 10
+          STATUS=$(curl -s -u ${{ secrets.SONAR_TOKEN }}: \
+            "http://localhost:9000/api/qualitygates/project_status?projectKey=SecNotes" \
+            | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          status = data.get('projectStatus', {}).get('status', 'UNKNOWN')
+          print(status)
+          ")
+          echo "Quality Gate status: $STATUS"
+          if [ "$STATUS" = "ERROR" ]; then
+            echo "Quality Gate FAILED - pipeline should block deployment in production"
+          else
+            echo "Quality Gate PASSED or not blocking for this lab"
+          fi
+
   docker_build:
     name: Build Docker Image
     runs-on: self-hosted
@@ -66,15 +196,55 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image inside minikube Docker daemon
         run: |
-          # Export minikube docker env variables explicitly
           export DOCKER_TLS_VERIFY=$(minikube docker-env | grep DOCKER_TLS_VERIFY | cut -d'"' -f2)
           export DOCKER_HOST=$(minikube docker-env | grep DOCKER_HOST | cut -d'"' -f2)
           export DOCKER_CERT_PATH=$(minikube docker-env | grep DOCKER_CERT_PATH | cut -d'"' -f2)
-          export MINIKUBE_ACTIVE_DOCKERD=$(minikube docker-env | grep MINIKUBE_ACTIVE_DOCKERD | cut -d'"' -f2)
-
-          echo "Docker host: $DOCKER_HOST"
           docker build -t $DOCKER_IMAGE:latest .
           docker images | grep $DOCKER_IMAGE
+
+  trivy_scan:
+    name: Container Scan - Trivy
+    runs-on: self-hosted
+    needs: docker_build
+    continue-on-error: true
+    steps:
+      - name: Run Trivy on Docker image
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd):/output \
+            aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output /output/trivy-report.json \
+            $DOCKER_IMAGE:latest || true
+      - name: Show Trivy summary
+        if: always()
+        run: |
+          if [ -f trivy-report.json ]; then
+            cat trivy-report.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          results = data.get('Results', [])
+          total = 0
+          for r in results:
+              vulns = r.get('Vulnerabilities', []) or []
+              total += len(vulns)
+              for v in vulns[:5]:
+                  sev = v.get('Severity', '')
+                  pkg = v.get('PkgName', '')
+                  cve = v.get('VulnerabilityID', '')
+                  print(f'  [{sev}] {pkg} - {cve}')
+          print(f'Total: {total} vulnerabilities')
+          " || echo "Could not parse Trivy report"
+          fi
+      - name: Upload Trivy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy-report.json
+          retention-days: 7
 
   k8s_deploy:
     name: Deploy to Kubernetes
@@ -107,14 +277,25 @@ jobs:
       - name: Verify app is reachable
         run: curl -f $APP_URL
 
-      - name: Pull OWASP ZAP image
-        run: docker pull ghcr.io/zaproxy/zaproxy:stable
-
       - name: Create ZAP output directory
         run: mkdir -p zap-reports
 
-      - name: Run ZAP Baseline Scan
+      - name: Register test user for authenticated scan
         run: |
+          curl -s -X POST $APP_URL/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"username":"zapuser","email":"zap@test.com","password":"zappass123","role":"user"}' \
+            || true
+
+      - name: Get auth token and run ZAP with authentication
+        run: |
+          TOKEN=$(curl -s -X POST $APP_URL/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"username":"zapuser","password":"zappass123"}' \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || echo "")
+
+          echo "Token obtained: $([ -n "$TOKEN" ] && echo YES || echo NO)"
+
           docker run --rm \
             -v $(pwd)/zap-reports:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
@@ -122,8 +303,9 @@ jobs:
             -t $APP_URL \
             -r zap-report.html \
             -J zap-report.json \
-            -I
-        continue-on-error: true
+            -I \
+            $([ -n "$TOKEN" ] && echo "-z '-config replacer.full_list(0).description=auth -config replacer.full_list(0).enabled=true -config replacer.full_list(0).matchtype=REQ_HEADER -config replacer.full_list(0).matchstr=Authorization -config replacer.full_list(0).replacement=Bearer\ '$TOKEN'" || echo "") \
+            || true
 
       - name: Show ZAP summary
         if: always()
