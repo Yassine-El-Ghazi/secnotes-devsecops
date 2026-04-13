@@ -36,7 +36,7 @@ spec:
     spec:
       containers:
         - name: secnotes-app
-          image: secnotes:latest
+          image: secnotes-app:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
