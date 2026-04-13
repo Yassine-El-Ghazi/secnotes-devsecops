@@ -66,7 +66,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image inside minikube Docker daemon
         run: |
-          eval $(minikube docker-env)
+          # Export minikube docker env variables explicitly
+          export DOCKER_TLS_VERIFY=$(minikube docker-env | grep DOCKER_TLS_VERIFY | cut -d'"' -f2)
+          export DOCKER_HOST=$(minikube docker-env | grep DOCKER_HOST | cut -d'"' -f2)
+          export DOCKER_CERT_PATH=$(minikube docker-env | grep DOCKER_CERT_PATH | cut -d'"' -f2)
+          export MINIKUBE_ACTIVE_DOCKERD=$(minikube docker-env | grep MINIKUBE_ACTIVE_DOCKERD | cut -d'"' -f2)
+
+          echo "Docker host: $DOCKER_HOST"
           docker build -t $DOCKER_IMAGE:latest .
           docker images | grep $DOCKER_IMAGE
 
@@ -99,8 +105,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify app is reachable
-        run: |
-          curl -f $APP_URL || (echo "App not reachable at $APP_URL" && exit 1)
+        run: curl -f $APP_URL
 
       - name: Pull OWASP ZAP image
         run: docker pull ghcr.io/zaproxy/zaproxy:stable
@@ -123,9 +128,7 @@ jobs:
       - name: Show ZAP summary
         if: always()
         run: |
-          echo "=== ZAP Scan Complete ==="
           if [ -f zap-reports/zap-report.json ]; then
-            echo "Alerts found:"
             cat zap-reports/zap-report.json | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
@@ -138,8 +141,6 @@ jobs:
                   count = alert.get('count', 0)
                   print(f'  [{risk}] {name} ({count} instances)')
           "
-          else
-            echo "No JSON report found"
           fi
 
       - name: Upload ZAP report
