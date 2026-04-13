@@ -13,33 +13,15 @@ env:
 
 jobs:
 
-  install_deps:
-    name: Install Dependencies
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install npm dependencies
-        run: npm install
-      - name: Upload node_modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-modules
-          path: node_modules/
-          retention-days: 1
-
   unit_tests:
     name: Unit Tests
     runs-on: self-hosted
-    needs: install_deps
     steps:
       - uses: actions/checkout@v4
-      - name: Download node_modules
-        uses: actions/download-artifact@v4
-        with:
-          name: node-modules
-          path: node_modules/
-      - name: Run Jest tests with coverage
-        run: ./node_modules/.bin/jest --runInBand --detectOpenHandles --coverage --forceExit
+      - name: Install deps and run tests
+        run: |
+          npm install
+          npm test -- --coverage --forceExit
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always()
@@ -51,7 +33,7 @@ jobs:
   sonarqube_scan:
     name: SAST - SonarQube
     runs-on: self-hosted
-    needs: [install_deps, unit_tests]
+    needs: unit_tests
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
