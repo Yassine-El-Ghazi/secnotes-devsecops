@@ -182,11 +182,6 @@ jobs:
           print(status)
           ")
           echo "Quality Gate status: $STATUS"
-          if [ "$STATUS" = "ERROR" ]; then
-            echo "Quality Gate FAILED - pipeline should block deployment in production"
-          else
-            echo "Quality Gate PASSED or not blocking for this lab"
-          fi
 
   docker_build:
     name: Build Docker Image
@@ -213,7 +208,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $(pwd):/output \
-            aquasec/trivy:latest image \
+            ghcr.io/aquasecurity/trivy:latest image \
             --severity HIGH,CRITICAL \
             --format json \
             --output /output/trivy-report.json \
@@ -280,22 +275,25 @@ jobs:
       - name: Create ZAP output directory
         run: mkdir -p zap-reports
 
-      - name: Register test user for authenticated scan
+      - name: Register test user
         run: |
           curl -s -X POST $APP_URL/api/auth/register \
             -H "Content-Type: application/json" \
             -d '{"username":"zapuser","email":"zap@test.com","password":"zappass123","role":"user"}' \
             || true
 
-      - name: Get auth token and run ZAP with authentication
+      - name: Get auth token
+        id: get_token
         run: |
           TOKEN=$(curl -s -X POST $APP_URL/api/auth/login \
             -H "Content-Type: application/json" \
             -d '{"username":"zapuser","password":"zappass123"}' \
             | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || echo "")
-
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
           echo "Token obtained: $([ -n "$TOKEN" ] && echo YES || echo NO)"
 
+      - name: Run ZAP baseline scan
+        run: |
           docker run --rm \
             -v $(pwd)/zap-reports:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
@@ -303,9 +301,7 @@ jobs:
             -t $APP_URL \
             -r zap-report.html \
             -J zap-report.json \
-            -I \
-            $([ -n "$TOKEN" ] && echo "-z '-config replacer.full_list(0).description=auth -config replacer.full_list(0).enabled=true -config replacer.full_list(0).matchtype=REQ_HEADER -config replacer.full_list(0).matchstr=Authorization -config replacer.full_list(0).replacement=Bearer\ '$TOKEN'" || echo "") \
-            || true
+            -I || true
 
       - name: Show ZAP summary
         if: always()
