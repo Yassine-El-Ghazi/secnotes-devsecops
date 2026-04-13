@@ -1,0 +1,6 @@
+projectKey=SecNotes
+serverUrl=http://localhost:9000
+serverVersion=26.3.0.120487
+dashboardUrl=http://localhost:9000/dashboard?id=SecNotes
+ceTaskId=73a641fe-0f44-4fdf-a60a-df759e3253a4
+ceTaskUrl=http://localhost:9000/api/ce/task?id=73a641fe-0f44-4fdf-a60a-df759e3253a4
