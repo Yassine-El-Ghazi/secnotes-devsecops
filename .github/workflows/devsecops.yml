@@ -39,7 +39,7 @@ jobs:
           name: node-modules
           path: node_modules/
       - name: Run Jest tests with coverage
-        run: npm test -- --coverage --forceExit
+        run: ./node_modules/.bin/jest --runInBand --detectOpenHandles --coverage --forceExit
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always()
